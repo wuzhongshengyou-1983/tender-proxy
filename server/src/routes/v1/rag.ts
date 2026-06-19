@@ -3,7 +3,7 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { sqliteQuotaStore } from '../lib/stores.js';
+import { getQuotaStore } from '../../lib/stores.js';
 import { consume, type Plan } from '@tender/quota';
 import { audit } from '@tender/audit';
 
@@ -25,7 +25,7 @@ export async function ragRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(400).send({ ok: false, error: 'documents required' });
     }
 
-    const quotaResult = await consume(sqliteQuotaStore, req.tenant.tenantId, 'rag', req.tenant.plan as Plan);
+    const quotaResult = await consume(getQuotaStore(), req.tenant.tenantId, 'rag', req.tenant.plan as Plan);
     if (quotaResult.exceeded) {
       return reply.code(429).send({ ok: false, error: 'quota_exceeded' });
     }
@@ -59,7 +59,7 @@ export async function ragRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(400).send({ ok: false, error: 'query required' });
     }
 
-    const quotaResult = await consume(sqliteQuotaStore, req.tenant.tenantId, 'rag', req.tenant.plan as Plan);
+    const quotaResult = await consume(getQuotaStore(), req.tenant.tenantId, 'rag', req.tenant.plan as Plan);
     if (quotaResult.exceeded) {
       return reply.code(429).send({ ok: false, error: 'quota_exceeded' });
     }

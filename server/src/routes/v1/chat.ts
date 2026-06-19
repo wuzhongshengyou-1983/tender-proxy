@@ -10,7 +10,7 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { runScope, Scope } from '@tender/core';
 import { consume, refund, todayDateString, buildScopeKey, type Plan } from '@tender/quota';
 import { audit } from '@tender/audit';
-import { sqliteQuotaStore } from '../lib/stores.js';
+import { getQuotaStore } from '../../lib/stores.js';
 import { createDefaultRouter } from '@tender/router';
 
 export async function chatCompletionsRoute(app: FastifyInstance): Promise<void> {
@@ -50,7 +50,7 @@ export async function chatCompletionsRoute(app: FastifyInstance): Promise<void> 
     });
 
     // 配额检查
-    const quotaResult = await consume(sqliteQuotaStore, tenant.tenantId, 'llm', tenant.plan as Plan);
+    const quotaResult = await consume(getQuotaStore(), tenant.tenantId, 'llm', tenant.plan as Plan);
     if (quotaResult.exceeded) {
       return reply.code(429).send({
         ok: false,
@@ -130,7 +130,7 @@ export async function chatCompletionsRoute(app: FastifyInstance): Promise<void> 
       });
     } catch (err) {
       // 失败退配额
-      await refund(sqliteQuotaStore, tenant.tenantId, 'llm');
+      await refund(getQuotaStore(), tenant.tenantId, 'llm');
 
       const e = err as { message?: string };
       return reply.code(502).send({

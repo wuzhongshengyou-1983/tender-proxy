@@ -7,7 +7,7 @@ import { Scope } from '@tender/core';
 import { consume, refund, type Plan } from '@tender/quota';
 import { audit } from '@tender/audit';
 import { openaiToAnthropicResponse } from '@tender/protocol';
-import { sqliteQuotaStore } from '../lib/stores.js';
+import { getQuotaStore } from '../../lib/stores.js';
 import { createDefaultRouter } from '@tender/router';
 
 export async function anthropicMessagesRoute(app: FastifyInstance): Promise<void> {
@@ -47,7 +47,7 @@ export async function anthropicMessagesRoute(app: FastifyInstance): Promise<void
       metadata: { plan: tenant.plan, model: body.model },
     });
 
-    const quotaResult = await consume(sqliteQuotaStore, tenant.tenantId, 'llm', tenant.plan as Plan);
+    const quotaResult = await consume(getQuotaStore(), tenant.tenantId, 'llm', tenant.plan as Plan);
     if (quotaResult.exceeded) {
       return reply.code(429).send({ ok: false, error: 'quota_exceeded', limit: quotaResult.limit });
     }
@@ -97,7 +97,7 @@ export async function anthropicMessagesRoute(app: FastifyInstance): Promise<void
               function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
             })) } : {}),
           },
-          finish_reason: result.finishReason,
+          finish_reason: (result.finishReason === 'error' ? 'stop' : result.finishReason) as 'stop' | 'length' | 'tool_calls' | 'content_filter' | null,
         }],
         usage: {
           prompt_tokens: result.usage.promptTokens,
@@ -108,7 +108,7 @@ export async function anthropicMessagesRoute(app: FastifyInstance): Promise<void
       const anthropicResp = openaiToAnthropicResponse(openaiResp);
       return reply.code(200).send(anthropicResp);
     } catch (err) {
-      await refund(sqliteQuotaStore, tenant.tenantId, 'llm');
+      await refund(getQuotaStore(), tenant.tenantId, 'llm');
       const e = err as { message?: string };
       return reply.code(502).send({ ok: false, error: 'provider_failed', detail: e.message });
     }

@@ -54,7 +54,10 @@ export function openaiToAnthropicRequest(openai: OpenAIRequest): AnthropicReques
     if (msg.role === 'assistant' && msg.tool_calls?.length) {
       const last = messages[messages.length - 1];
       if (typeof last.content === 'string') {
-        last.content = [{ type: 'text', text: last.content }];
+        // 空字符串 → 空数组(不产生空 text block,让 tool_use 排在第一位)
+        last.content = last.content
+          ? [{ type: 'text', text: last.content }]
+          : [];
       }
       for (const tc of msg.tool_calls) {
         try {

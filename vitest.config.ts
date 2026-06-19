@@ -8,7 +8,8 @@ export default defineConfig({
     include: [
       'packages/*/test/**/*.test.ts',
       'packages/*/src/**/*.test.ts',
-      'server/test/**/*.test.ts'
+      'server/test/**/*.test.ts',
+      'test/e2e/**/*.test.ts'
     ],
     coverage: {
       provider: 'v8',

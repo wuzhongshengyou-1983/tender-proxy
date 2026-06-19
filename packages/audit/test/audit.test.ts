@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { Auditor, MemoryAuditSink, auditor, audit } from '../src/index.js';
+import { Auditor, MemoryAuditSink, audit } from '../src/index.js';
 
 describe('Audit — 基础行为', () => {
   let sink: MemoryAuditSink;
@@ -75,7 +75,10 @@ describe('便捷 wrapper', () => {
   beforeEach(() => {
     sink = new MemoryAuditSink();
     localAuditor = new Auditor();
+    localAuditor.clearSinks();
     localAuditor.addSink(sink);
+    // 替换全局 wrapper 的目标(测试隔离)
+    Object.assign(audit as any, wrapWith(localAuditor));
   });
 
   it('audit.llmCall → action: llm.call', async () => {
@@ -94,3 +97,19 @@ describe('便捷 wrapper', () => {
     expect(sink.events[0].status).toBe('error');
   });
 });
+
+/** helper: 把 audit.xxx 包装为指向指定 auditor */
+function wrapWith(target: Auditor) {
+  return {
+    llmCall: (e: any) => target.audit({ ...e, action: 'llm.call' }),
+    ragQuery: (e: any) => target.audit({ ...e, action: 'rag.query' }),
+    toolCall: (e: any) => target.audit({ ...e, action: 'tool.call' }),
+    toolBlocked: (e: any) => target.audit({ ...e, action: 'tool.blocked', status: 'error' }),
+    login: (e: any) => target.audit({ ...e, action: 'auth.login' }),
+    register: (e: any) => target.audit({ ...e, action: 'auth.register' }),
+    bindPlatform: (e: any) => target.audit({ ...e, action: 'custom', target: 'bind_platform' }),
+    exportData: (e: any) => target.audit({ ...e, action: 'admin.audit.export' }),
+    quotaExceeded: (e: any) => target.audit({ ...e, action: 'quota.exceeded', status: 'error' }),
+    custom: (e: any) => target.audit({ ...e, action: 'custom' }),
+  };
+}

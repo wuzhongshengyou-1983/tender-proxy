@@ -192,15 +192,16 @@ describe('StaleGuard — 异步 stale 守门', () => {
 
   it('guardAsync 在 scope abort 时返回 undefined', async () => {
     const scope = new Scope(baseOpts);
-    const result = await guardAsync(scope, { url: 'http://a.com' }, async (_snap, signal) => {
+    // 先启动 guardAsync(scope),然后中途 abort,scope abort 时 fn 返回 undefined
+    const promise = guardAsync(scope, { url: 'http://a.com' }, async (_snap, signal) => {
       return new Promise((resolve) => {
         signal.addEventListener('abort', () => resolve(undefined));
         setTimeout(() => resolve('result'), 100);
       });
     });
-    scope.abort('test');
-    // 给 abort 一点时间传播
-    await new Promise((r) => setTimeout(r, 10));
+    // 中途 abort
+    setTimeout(() => scope.abort('test'), 10);
+    const result = await promise;
     expect(result).toBeUndefined();
   });
 });

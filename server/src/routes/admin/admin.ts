@@ -3,8 +3,8 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { getDB } from '../lib/db.js';
-import { authMiddleware } from '../middleware/auth.js';
+import { getDB } from '../../lib/db.js';
+import { authMiddleware } from '../../middleware/auth.js';
 
 export async function adminRoutes(app: FastifyInstance): Promise<void> {
   // 公开端点:创建 tenant(自服务)

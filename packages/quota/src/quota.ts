@@ -11,11 +11,30 @@
  */
 
 import { Bus, Events } from '@tender/core';
-import { audit } from '@tender/audit';
 
 export type QuotaKind = 'llm' | 'rag' | 'tool';
 
 export type Plan = 'free' | 'pro' | 'enterprise';
+
+/**
+ * 配额超限回调(可选,不强制依赖 @tender/audit)
+ */
+export type OnQuotaExceeded = (event: {
+  tenantId: string;
+  kind: QuotaKind;
+  plan: Plan;
+  count: number;
+  limit: number;
+}) => void | Promise<void>;
+
+let _onQuotaExceeded: OnQuotaExceeded | null = null;
+
+/**
+ * 设置配额超限回调(由 server 注入,把 quota 事件桥接到 audit)
+ */
+export function setQuotaExceededHandler(handler: OnQuotaExceeded | null): void {
+  _onQuotaExceeded = handler;
+}
 
 /**
  * 各 plan 的限额(按日)
@@ -120,7 +139,10 @@ export async function consume(
     // 超额,立即退一格
     await store.atomicDecrement(scope, key, day, 1);
     Bus.emit(Events.QUOTA_EXCEEDED, { tenantId, kind, plan, count: count - 1, limit });
-    audit.quotaExceeded({ tenantId, target: kind, meta: { plan, limit, count: count - 1 } });
+    // 触发回调(由 server 注入 audit)
+    if (_onQuotaExceeded) {
+      await _onQuotaExceeded({ tenantId, kind, plan, count: count - 1, limit });
+    }
     return { count: count - 1, limit, exceeded: true, refunded: true };
   }
 

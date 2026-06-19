@@ -10,10 +10,12 @@ export {
   getQuota,
   todayDateString,
   buildScopeKey,
+  setQuotaExceededHandler,
   MemoryQuotaStore,
   PLAN_LIMITS,
   type QuotaKind,
   type Plan,
   type QuotaStore,
   type ConsumeResult,
+  type OnQuotaExceeded,
 } from './quota.js';

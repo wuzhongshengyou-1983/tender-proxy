@@ -33,19 +33,10 @@ export async function createApp(opts: AppOptions = {}): Promise<FastifyInstance>
     trustProxy: true,
   });
 
-  // 全局中间件
-  app.addHook('onRequest', async (req) => {
-    req.ip = req.headers['x-forwarded-for']?.toString().split(',')[0].trim() || req.ip;
-  });
-
   // 健康检查(无需 auth)
   await app.register(healthRoute);
 
-  // 业务路由(默认启用 auth)
-  const auth = opts.enableAuth === false ? [] : [{ preHandler: authMiddleware }];
-  await app.register(chatCompletionsRoute, { prefix: '', ...{ preHandler: auth } } as never).catch(() => {});
-  // 上面一行 hack:fastify 不支持直接传 preHandler 到 register,实际在路由内做
-
+  // 业务路由(auth 在各路由内做 preHandler)
   await app.register(chatCompletionsRoute);
   await app.register(anthropicMessagesRoute);
   await app.register(ragRoutes);
@@ -53,13 +44,14 @@ export async function createApp(opts: AppOptions = {}): Promise<FastifyInstance>
   await app.register(adminRoutes);
 
   // 全局错误处理
-  app.setErrorHandler((error, req, reply) => {
-    app.log?.error(error);
-    const statusCode = error.statusCode ?? 500;
+  app.setErrorHandler((error: unknown, req, reply) => {
+    const err = error as { statusCode?: number; message?: string; code?: string };
+    app.log?.error(err);
+    const statusCode = err.statusCode ?? 500;
     reply.code(statusCode).send({
       ok: false,
-      error: error.message,
-      code: error.code,
+      error: err.message ?? 'internal_error',
+      code: err.code,
     });
   });
 
@@ -91,7 +83,7 @@ export async function startServer(): Promise<void> {
 }
 
 // 如果直接运行该文件,启动 server
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith('index.ts')) {
   startServer().catch((err) => {
     console.error('[tender] failed to start:', err);
     process.exit(1);

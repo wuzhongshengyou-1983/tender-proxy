@@ -95,6 +95,13 @@ export class Auditor {
   }
 
   /**
+   * 清空所有 sink(测试用)
+   */
+  clearSinks(): void {
+    this.sinks = [];
+  }
+
+  /**
    * 写入审计事件(失败静默,不阻断主流程)
    */
   async audit(event: AuditEvent): Promise<void> {

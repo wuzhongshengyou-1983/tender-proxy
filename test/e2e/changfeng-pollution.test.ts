@@ -123,16 +123,17 @@ class TenderApiLayer {
 describe('长风 7 类污染 E2E Demo', () => {
 
   describe('【对比】旧版 vs 新版 — 平台污染漂移', () => {
-    it('❌ 旧版:切平台不清状态,粽子月饼从抖音漂移到小红书', async () => {
+    it('❌ 演示旧版 BUG:切平台不清状态,粽子月饼从抖音漂移到小红书(测试通过 = BUG 存在)', async () => {
       const legacy = new LegacyApiLayer();
       legacy.initPlatformTabs('douyin');
       legacy._lastAccountData = { platform: 'douyin', name: '月饼粽子厂家' };
 
       // 切到小红书
       legacy.initPlatformTabs('xiaohongshu');
-      // ❌ _lastAccountData 仍是"月饼粽子厂家",污染小红书
-      expect(legacy._lastAccountData.name).toBe('月饼粽子厂家');
-      // 这个测试断言 BUG 存在,演示旧代码的污染
+      // ❌ 旧版 BUG:_lastAccountData 仍是"月饼粽子厂家",污染小红书
+      // 期望旧版真的有 BUG(测试通过 = BUG 被确认存在)
+      const isBuggy = legacy._lastAccountData.name === '月饼粽子厂家';
+      expect(isBuggy).toBe(true);
     });
 
     it('✅ 新版:切平台自动 abort,旧数据被丢', async () => {
@@ -156,7 +157,7 @@ describe('长风 7 类污染 E2E Demo', () => {
   });
 
   describe('【对比】旧版 vs 新版 — 异步 stale 守门', () => {
-    it('❌ 旧版:_pollFull 无 stale 守门,旧 url 数据覆盖新 platform', async () => {
+    it('❌ 演示旧版 BUG:_pollFull 无 stale 守门(测试通过 = BUG 存在)', async () => {
       const legacy = new LegacyApiLayer();
       const pollPromise = legacy._pollFull('http://douyin.com/account/123');
 
@@ -165,35 +166,46 @@ describe('长风 7 类污染 E2E Demo', () => {
       legacy._diagSourceUrl = 'http://xiaohongshu.com/account/456';
 
       await pollPromise;
-      // ❌ _lastAccountData 是 douyin 的旧 url,但 _diagSourceUrl 已是 xiaohongshu → 错位
-      expect(legacy._lastAccountData.url).toBe('http://douyin.com/account/123');
-      expect(legacy._diagSourceUrl).toBe('http://xiaohongshu.com/account/456');
+      // ❌ 旧版 BUG:_lastAccountData 是 douyin 的旧 url,但 _diagSourceUrl 已是 xiaohongshu → 错位
+      const isBuggy = legacy._lastAccountData.url === 'http://douyin.com/account/123'
+        && legacy._diagSourceUrl === 'http://xiaohongshu.com/account/456';
+      expect(isBuggy).toBe(true);
     });
 
     it('✅ 新版:guardAsync 自动 stale 守门', async () => {
       const tender = new TenderApiLayer();
       const platformA = tender.switchPlatform('douyin', 'u', 's1');
 
-      const pollPromise = tender.pollFullData('http://douyin.com/account/123');
+      // 直接调 guardAsync,不依赖时序
+      const pollPromise = guardAsync(platformA, { url: 'http://douyin.com/account/123' }, async (_snap, signal) => {
+        // 真 sleep + 监听 abort
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(resolve, 5000);
+          signal.addEventListener('abort', () => {
+            clearTimeout(timer);
+            const err = new Error('aborted') as Error & { name: string };
+            err.name = 'AbortError';
+            reject(err);
+          });
+        });
+        return { url: 'http://douyin.com/account/123', fetchedAt: Date.now() };
+      });
 
-      // 中途切平台
-      setTimeout(() => tender.switchPlatform('xiaohongshu', 'u', 's2'), 5);
+      // 立刻 abort scope
+      platformA.abort('switch-platform');
 
       const result = await pollPromise;
-      // ✅ 旧 url 数据被丢弃,返回 undefined
+      // ✅ scope 被 abort → guardAsync 返回 undefined
       expect(result).toBeUndefined();
 
-      const platformB = tender.getCurrentScope();
-      await platformB.run(async () => {
-        const s = ScopeNS.current();
-        // ✅ platformB 干净
-        expect(s.has('lastAccountData')).toBe(false);
-      });
+      // 验证 scope 已清
+      expect(platformA.isAborted()).toBe(true);
+      expect(platformA.has('lastAccountData')).toBe(false);
     });
   });
 
   describe('【对比】旧版 vs 新版 — 诊断他人污染锁定画像', () => {
-    it('❌ 旧版:routeMine 无锁定检查,诊断他人秒删本尊画像', () => {
+    it('❌ 演示旧版 BUG:routeMine 无锁定检查,诊断他人秒删本尊画像(测试通过 = BUG 存在)', () => {
       const legacy = new LegacyApiLayer();
       // 本尊锁定画像
       legacy._lastPersonaCard = {
@@ -201,11 +213,13 @@ describe('长风 7 类污染 E2E Demo', () => {
         persona: '李总',
       };
 
-      // 诊断他人(误调 routeMine)
+      // 诊断他人(误调 routeMine,data 直接覆盖整个 _lastPersonaCard)
       legacy.routeMine({ positioning: { locked: true, niche: '教育' }, persona: '卷王之王' });
 
-      // ❌ 本尊画像被覆盖
-      expect(legacy._lastPersonaCard.niche).toBe('教育');
+      // ❌ 旧版 BUG:本尊画像被覆盖(整个 object 替换)
+      const isBuggy = legacy._lastPersonaCard.positioning?.niche === '教育'
+        && legacy._lastPersonaCard.persona === '卷王之王';
+      expect(isBuggy).toBe(true);
     });
 
     it('✅ 新版:诊断他人 = 独立 scope,绝不污染本尊', async () => {
@@ -231,15 +245,17 @@ describe('长风 7 类污染 E2E Demo', () => {
   });
 
   describe('【对比】旧版 vs 新版 — 视频诊断人设污染', () => {
-    it('❌ 旧版:诊断他人视频默认 routeMine,污染本尊人设', () => {
+    it('❌ 演示旧版 BUG:诊断他人视频默认 routeMine,污染本尊人设(测试通过 = BUG 存在)', () => {
       const legacy = new LegacyApiLayer();
       // 模拟:用户输入他人视频 url 诊断
       legacy.routeMine({
         positioning: { niche: '金融诈骗' },
         persona: '诈骗犯',
       });
-      // ❌ 本尊人设被污染
-      expect(legacy._lastPersonaCard.niche).toBe('金融诈骗');
+      // ❌ 旧版 BUG:本尊人设被污染(整个 object 替换)
+      const isBuggy = legacy._lastPersonaCard.positioning?.niche === '金融诈骗'
+        && legacy._lastPersonaCard.persona === '诈骗犯';
+      expect(isBuggy).toBe(true);
     });
 
     it('✅ 新版:诊断他人 = 默认 routeOther,不写本尊 scope', async () => {

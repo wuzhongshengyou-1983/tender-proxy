@@ -129,10 +129,9 @@ describe('ProviderRouter — 主备链 fallback', () => {
 
   it('失败 provider 临时拉黑 10 分钟', async () => {
     globalThis.fetch = mockFetchSequence([
-      { ok: false, status: 402, body: {} },
-      { ok: true, body: { id: '1', choices: [{ message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }], usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } } },
-      { ok: false, status: 402, body: {} },
-      { ok: true, body: { id: '2', choices: [{ message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }], usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } } },
+      { ok: false, status: 402, body: {} },                              // 第 1 次 route: DS 402
+      { ok: true, body: { id: '1', choices: [{ message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }], usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } } },  // 第 1 次 route: SF ok
+      { ok: true, body: { id: '2', choices: [{ message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }], usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } } },  // 第 2 次 route: DS 拉黑跳过,SF ok
     ]);
 
     const router = new ProviderRouter({ providers: [mockDeepseek, mockSilicon], blockDurationMs: 60_000 });
@@ -251,12 +250,12 @@ describe('ProviderRouter — 主备链 fallback', () => {
 
   it('unblock 强制解除拉黑', async () => {
     globalThis.fetch = mockFetchSequence([
-      { ok: false, status: 402, body: {} },
-      { ok: true, body: { id: '1', choices: [{ message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }], usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } } },
-      { ok: true, body: { id: '2', choices: [{ message: { role: 'assistant', content: 'OK2' }, finish_reason: 'stop' }], usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } } },
+      { ok: false, status: 402, body: {} },                              // 第 1 次 route: DS 402
+      { ok: true, body: { id: '1', choices: [{ message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }], usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } } },  // 第 1 次 route: SF ok
+      { ok: true, body: { id: '2', choices: [{ message: { role: 'assistant', content: 'OK2' }, finish_reason: 'stop' }], usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } } },  // 第 2 次 route: SF ok(unblock 后)
     ]);
 
-    const router = new ProviderRouter({ providers: [mockDeepseek], blockDurationMs: 60_000 });
+    const router = new ProviderRouter({ providers: [mockDeepseek, mockSilicon], blockDurationMs: 60_000 });
     await router.route({ messages: [{ role: 'user', content: '1' }] });
     expect(router.getBlockedProviders().length).toBe(1);
 

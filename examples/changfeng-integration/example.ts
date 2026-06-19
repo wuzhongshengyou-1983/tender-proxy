@@ -57,8 +57,17 @@ class ChangFengDiag {
 
     const guard = new StaleGuard();
     return await guardAsync(this.currentScope, { url }, async ({ url }, signal) => {
-      const res = await fetch(url, { signal });
-      return res.json();
+      // 模拟真实长 polling(200ms,期间可被 abort)
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, 200);
+        signal.addEventListener('abort', () => {
+          clearTimeout(timer);
+          const err = new Error('aborted') as Error & { name: string };
+          err.name = 'AbortError';
+          reject(err);
+        });
+      });
+      return { url, fetchedAt: Date.now() };
     });
     // 如果 scope 被 abort → 返回 undefined → 业务层写入时守门拒绝
   }

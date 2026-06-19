@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  tender:
+    build: .
+    image: tender:0.1.0
+    container_name: tender-server
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # Server
+      - TENDER_PORT=8080
+      - TENDER_HOST=0.0.0.0
+      - TENDER_NODE_ENV=production
+      - TENDER_LOG_LEVEL=info
+      # Auth(生产环境请改为 secure random)
+      - TENDER_JWT_SECRET=${TENDER_JWT_SECRET:-change-me-please-use-openssl-rand-hex-32}
+      - TENDER_API_KEY_SALT=${TENDER_API_KEY_SALT:-change-me-salt}
+      - TENDER_ADMIN_KEY=${TENDER_ADMIN_KEY:-change-me-admin}
+      # 加密(企业版)
+      - TENDER_ENCRYPTION_KEY=${TENDER_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      # Provider keys(按需填)
+      - TENDER_DEEPSEEK_API_KEY=${TENDER_DEEPSEEK_API_KEY:-}
+      - TENDER_SILICONFLOW_API_KEY=${TENDER_SILICONFLOW_API_KEY:-}
+      - TENDER_QWEN_API_KEY=${TENDER_QWEN_API_KEY:-}
+      - TENDER_OPENAI_API_KEY=${TENDER_OPENAI_API_KEY:-}
+      - TENDER_ANTHROPIC_API_KEY=${TENDER_ANTHROPIC_API_KEY:-}
+      # 限流
+      - TENDER_RATE_LIMIT_PER_MIN=60
+      - TENDER_GLOBAL_CONCURRENCY=20
+    volumes:
+      - tender-data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  tender-data:
+    driver: local

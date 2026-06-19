@@ -1,0 +1,20 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "composite": true,
+    "declaration": false,
+    "declarationMap": false
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist", "test"],
+  "references": [
+    { "path": "../packages/core" },
+    { "path": "../packages/auth" },
+    { "path": "../packages/protocol" },
+    { "path": "../packages/router" },
+    { "path": "../packages/audit" },
+    { "path": "../packages/quota" }
+  ]
+}

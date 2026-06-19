@@ -1,0 +1,38 @@
+{
+  "name": "tender",
+  "version": "0.1.0",
+  "description": "AI 防污染 Proxy — 一行代码接入,自动隔离 session/tenant/rag/inference 4 层污染",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0",
+    "pnpm": ">=10.0.0"
+  },
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "lint": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "dev": "pnpm --filter @tender/server dev",
+    "start": "pnpm --filter @tender/server start",
+    "smoke": "bash scripts/smoke.sh",
+    "redteam": "bash scripts/redteam.sh",
+    "clean": "rm -rf node_modules packages/*/node_modules server/node_modules dist"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.5",
+    "@vitest/coverage-v8": "^2.1.5",
+    "supertest": "^7.0.0",
+    "@types/supertest": "^6.0.2",
+    "tsx": "^4.19.2"
+  },
+  "workspaces": [
+    "packages/*",
+    "server"
+  ]
+}

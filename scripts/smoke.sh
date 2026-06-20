@@ -146,6 +146,15 @@ status=$(curl -s -o /dev/null -w "%{http_code}" \
 run_test "Stream chat no auth" 401 "$status"
 echo
 
+# 11. POST /v1/messages stream=true 无 auth → 401(Anthropic SSE 也需 auth)
+echo "[11] POST /v1/messages stream=true (no auth → 401)"
+status=$(curl -s -o /dev/null -w "%{http_code}" \
+  -X POST "$BASE_URL/v1/messages" \
+  -H 'Content-Type: application/json' \
+  -d '{"stream":true,"max_tokens":100,"messages":[{"role":"user","content":"hi"}]}')
+run_test "Anthropic stream no auth" 401 "$status"
+echo
+
 # 总结
 echo "=========================================="
 TOTAL=$((PASS+FAIL))

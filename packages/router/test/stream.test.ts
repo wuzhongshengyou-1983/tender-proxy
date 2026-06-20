@@ -131,14 +131,5 @@ describe('callProviderStream — OpenAI SSE 流式', () => {
     // 真实场景:长风生产会用 75s 上限
   });
 
-  it('anthropic 协议抛 not implemented', async () => {
-    const anthropicProvider: ProviderConfig = { ...mockProvider, protocol: 'anthropic', name: 'anthropic' };
-    await expect(async () => {
-      for await (const _ of callProviderStream(anthropicProvider, {
-        messages: [{ role: 'user', content: 'hi' }],
-      })) {
-        // 不会到这里
-      }
-    }).rejects.toThrow(/anthropic streaming not yet implemented/);
-  });
+  // 注:Anthropic 协议流式测试已迁移到 anthropic-stream.test.ts(v0.4.0)
 });

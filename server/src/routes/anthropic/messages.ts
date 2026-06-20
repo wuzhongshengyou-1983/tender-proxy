@@ -32,12 +32,12 @@ export async function anthropicMessagesRoute(app: FastifyInstance): Promise<void
       return reply.code(400).send({ ok: false, error: 'max_tokens required (Anthropic API spec)' });
     }
 
-    if (body.stream) {
-      return reply.code(501).send({ ok: false, error: 'streaming not yet implemented' });
-    }
-
     const tenant = req.tenant;
     const sessionId = (req.headers['x-tender-session-id'] as string) ?? `sess_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+    if (body.stream) {
+      return handleAnthropicStream(req, reply, body, tenant, sessionId);
+    }
 
     const scope = new Scope({
       tenantId: tenant.tenantId,
@@ -113,4 +113,175 @@ export async function anthropicMessagesRoute(app: FastifyInstance): Promise<void
       return reply.code(502).send({ ok: false, error: 'provider_failed', detail: e.message });
     }
   });
+}
+
+/**
+ * Anthropic 兼容流式响应
+ *
+ * 转换 OpenAI SSE 翻译回 Anthropic SSE event 格式
+ *
+ * 流式翻译逻辑:
+ *   OpenAI chunk delta.content  → event: content_block_delta (text_delta)
+ *   OpenAI chunk delta.role    → message_start (首次)
+ *   OpenAI chunk finish_reason → message_delta (stop_reason)
+ *   [DONE]                     → message_stop
+ */
+async function handleAnthropicStream(
+  req: FastifyRequest,
+  reply: FastifyReply,
+  body: { model?: string; messages: Array<{ role: string; content: unknown }>; system?: string; max_tokens?: number; temperature?: number; tools?: unknown[] },
+  tenant: { tenantId: string; userId: string; plan: string },
+  sessionId: string
+): Promise<void> {
+  reply.hijack();
+  const raw = reply.raw;
+  raw.statusCode = 200;
+  raw.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  raw.setHeader('Cache-Control', 'no-cache');
+  raw.setHeader('Connection', 'keep-alive');
+  raw.setHeader('X-Tender-Session-Id', sessionId);
+
+  let isFirstChunk = true;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let stopReason: string | null = null;
+  let modelName = body.model ?? 'unknown';
+  const startedAt = Date.now();
+
+  try {
+    // 选第一个可用 provider
+    const router = createDefaultRouter();
+    const candidates = (router as any)._selectCandidates?.() ?? [];
+    const provider = candidates.find((p: any) => p.protocol === 'anthropic') ?? candidates[0];
+    if (!provider) throw new Error('no provider available');
+
+    const { callProviderStream } = await import('@tender/router');
+    modelName = provider.defaultModel;
+    const streamGen = callProviderStream(provider, {
+      model: body.model,
+      messages: body.messages.map(m => ({
+        role: m.role as 'system' | 'user' | 'assistant' | 'tool',
+        content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+      })),
+      temperature: body.temperature,
+      maxTokens: body.max_tokens,
+      tools: body.tools,
+      metadata: { tenantId: tenant.tenantId, userId: tenant.userId, sessionId },
+    });
+
+    // 立即 emit message_start(Anthropic 协议要求)
+    raw.write(`event: message_start\ndata: ${JSON.stringify({
+      type: 'message_start',
+      message: {
+        id: `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        type: 'message',
+        role: 'assistant',
+        content: [],
+        model: modelName,
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: 0, output_tokens: 0 },
+      },
+    })}\n\n`);
+
+    let textBlockStarted = false;
+
+    for await (const chunk of streamGen) {
+      const choice = chunk.choices?.[0];
+      if (!choice) {
+        if (chunk.usage) {
+          inputTokens = chunk.usage.prompt_tokens;
+          outputTokens = chunk.usage.completion_tokens;
+        }
+        continue;
+      }
+
+      const delta = choice.delta ?? {};
+
+      // 1. 文本 content → Anthropic content_block_delta (text_delta)
+      if (typeof delta.content === 'string' && delta.content.length > 0) {
+        if (!textBlockStarted) {
+          raw.write(`event: content_block_start\ndata: ${JSON.stringify({
+            type: 'content_block_start',
+            index: 0,
+            content_block: { type: 'text', text: '' },
+          })}\n\n`);
+          textBlockStarted = true;
+        }
+        raw.write(`event: content_block_delta\ndata: ${JSON.stringify({
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'text_delta', text: delta.content },
+        })}\n\n`);
+      }
+
+      // 2. tool_calls → Anthropic content_block (tool_use) 流式
+      if (delta.tool_calls) {
+        for (const tc of delta.tool_calls) {
+          if (tc.id && tc.function?.name) {
+            raw.write(`event: content_block_start\ndata: ${JSON.stringify({
+              type: 'content_block_start',
+              index: tc.index ?? 0,
+              content_block: { type: 'tool_use', id: tc.id, name: tc.function.name, input: {} },
+            })}\n\n`);
+          }
+          if (tc.function?.arguments) {
+            raw.write(`event: content_block_delta\ndata: ${JSON.stringify({
+              type: 'content_block_delta',
+              index: tc.index ?? 0,
+              delta: { type: 'input_json_delta', partial_json: tc.function.arguments },
+            })}\n\n`);
+          }
+        }
+      }
+
+      // 3. finish_reason → message_delta (stop_reason) + content_block_stop + message_stop
+      if (choice.finish_reason) {
+        stopReason = mapOaiFinishToAnthropic(choice.finish_reason);
+        if (textBlockStarted) {
+          raw.write(`event: content_block_stop\ndata: ${JSON.stringify({
+            type: 'content_block_stop',
+            index: 0,
+          })}\n\n`);
+          textBlockStarted = false;
+        }
+        raw.write(`event: message_delta\ndata: ${JSON.stringify({
+          type: 'message_delta',
+          delta: { stop_reason: stopReason, stop_sequence: null },
+          usage: { output_tokens: outputTokens },
+        })}\n\n`);
+        raw.write(`event: message_stop\ndata: ${JSON.stringify({ type: 'message_stop' })}\n\n`);
+        raw.end();
+        return;
+      }
+    }
+
+    // 流意外结束(没有 finish_reason)
+    if (textBlockStarted) {
+      raw.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: 0 })}\n\n`);
+    }
+    raw.write(`event: message_delta\ndata: ${JSON.stringify({
+      type: 'message_delta',
+      delta: { stop_reason: 'end_turn', stop_sequence: null },
+      usage: { output_tokens: outputTokens },
+    })}\n\n`);
+    raw.write(`event: message_stop\ndata: ${JSON.stringify({ type: 'message_stop' })}\n\n`);
+    raw.end();
+  } catch (err) {
+    const e = err as { message?: string };
+    raw.write(`event: error\ndata: ${JSON.stringify({
+      type: 'error',
+      error: { type: 'api_error', message: e.message ?? 'provider_failed' },
+    })}\n\n`);
+    raw.end();
+  }
+}
+
+function mapOaiFinishToAnthropic(reason: string | null): string {
+  switch (reason) {
+    case 'stop': return 'end_turn';
+    case 'length': return 'max_tokens';
+    case 'tool_calls': return 'tool_use';
+    default: return 'end_turn';
+  }
 }

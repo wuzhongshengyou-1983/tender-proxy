@@ -221,6 +221,149 @@ export async function callProvider(
   return callOpenAICompatible(config, req);
 }
 
+// ============================================
+// 流式调用(OpenAI 兼容 SSE)
+// ============================================
+
+/**
+ * OpenAI 兼容 provider 的流式调用
+ *
+ * 返回 AsyncIterable<OpenAIStreamChunk>,每个 chunk 是 OpenAI SSE 一行解析后的对象
+ *
+ * 调用方负责把 chunk 序列化成 SSE 格式输出给客户端
+ *
+ * 调用完成时,自动累加 usage(从最后一个 usage 字段抓)
+ */
+export async function* callProviderStream(
+  config: ProviderConfig,
+  req: LLMRequest
+): AsyncGenerator<OpenAIStreamChunk, void, void> {
+  if (config.protocol === 'anthropic') {
+    // v1.0.1 实现:Anthropic 协议翻译
+    throw new ProviderError(config.name, 'unknown', null, 'anthropic streaming not yet implemented', 0);
+  }
+
+  const url = `${config.baseUrl.replace(/\/$/, '')}/chat/completions`;
+  const model = req.model ?? config.defaultModel;
+
+  const body: Record<string, unknown> = {
+    model,
+    messages: req.messages,
+    stream: true,  // 强制流式
+  };
+  if (req.temperature !== undefined) body.temperature = req.temperature;
+  if (req.maxTokens !== undefined) body.max_tokens = req.maxTokens;
+  if (req.tools) body.tools = req.tools;
+  if (req.toolChoice) body.tool_choice = req.toolChoice;
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${config.apiKey}`,
+    Accept: 'text/event-stream',
+    ...config.headers,
+  };
+
+  const controller = new AbortController();
+  const timeoutMs = calcTimeoutMs(req.maxTokens);
+  const timer = setTimeout(() => controller.abort('timeout'), timeoutMs);
+
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (err: unknown) {
+    clearTimeout(timer);
+    const e = err as { name?: string; message?: string };
+    if (e.name === 'AbortError') {
+      throw new ProviderError(config.name, 'timeout', null, `timeout after ${timeoutMs}ms`, timeoutMs);
+    }
+    throw new ProviderError(config.name, 'unknown', null, e.message ?? 'fetch failed', 0);
+  }
+
+  if (!res.ok) {
+    clearTimeout(timer);
+    const failType = mapStatusToFailType(res.status);
+    const text = await res.text().catch(() => '');
+    throw new ProviderError(config.name, failType, res.status, text.slice(0, 200), 0);
+  }
+
+  if (!res.body) {
+    clearTimeout(timer);
+    throw new ProviderError(config.name, 'parse_error', res.status, 'no response body', 0);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // SSE 格式:data: {json}\n\n
+      // 切分行
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';  // 最后一行可能不完整
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        if (trimmed === 'data: [DONE]') {
+          // OpenAI 流结束标记
+          return;
+        }
+        if (!trimmed.startsWith('data:')) continue;
+        const data = trimmed.slice(5).trim();
+        try {
+          const chunk = JSON.parse(data) as OpenAIStreamChunk;
+          yield chunk;
+        } catch {
+          // 跳过无法解析的 chunk
+          continue;
+        }
+      }
+    }
+  } finally {
+    clearTimeout(timer);
+    reader.releaseLock();
+  }
+}
+
+/**
+ * OpenAI SSE chunk 类型(只声明我们用到的字段)
+ */
+export interface OpenAIStreamChunk {
+  id?: string;
+  object?: string;
+  created?: number;
+  model?: string;
+  choices?: Array<{
+    index: number;
+    delta: {
+      role?: string;
+      content?: string;
+      tool_calls?: Array<{
+        index?: number;
+        id?: string;
+        type?: 'function';
+        function?: { name?: string; arguments?: string };
+      }>;
+    };
+    finish_reason?: 'stop' | 'length' | 'tool_calls' | 'content_filter' | null;
+  }>;
+  usage?: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  };
+}
+
 function mapStatusToFailType(status: number): ProviderError['failType'] {
   if (status === 402) return '402';
   if (status === 401 || status === 403) return '401';

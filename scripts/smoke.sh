@@ -137,6 +137,15 @@ status=$(curl -s -o /dev/null -w "%{http_code}" \
 run_test "Session lookup no auth" 401 "$status"
 echo
 
+# 10. POST /v1/chat/completions stream=true 无 auth → 401(SSE 也需 auth)
+echo "[10] POST /v1/chat/completions stream=true (no auth → 401)"
+status=$(curl -s -o /dev/null -w "%{http_code}" \
+  -X POST "$BASE_URL/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -d '{"stream":true,"messages":[{"role":"user","content":"hi"}]}')
+run_test "Stream chat no auth" 401 "$status"
+echo
+
 # 总结
 echo "=========================================="
 TOTAL=$((PASS+FAIL))

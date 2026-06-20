@@ -16,5 +16,5 @@ export type {
 } from './types.js';
 export { ProviderError } from './types.js';
 
-export { callProvider, createMockProvider, type CallResult } from './provider.js';
+export { callProvider, callProviderStream, createMockProvider, type CallResult, type OpenAIStreamChunk } from './provider.js';
 export { ProviderRouter, createDefaultRouter, type RouterOptions } from './router.js';

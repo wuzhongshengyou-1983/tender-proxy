@@ -239,8 +239,8 @@ export async function* callProviderStream(
   req: LLMRequest
 ): AsyncGenerator<OpenAIStreamChunk, void, void> {
   if (config.protocol === 'anthropic') {
-    // v1.0.1 实现:Anthropic 协议翻译
-    throw new ProviderError(config.name, 'unknown', null, 'anthropic streaming not yet implemented', 0);
+    yield* callAnthropicStream(config, req);
+    return;
   }
 
   const url = `${config.baseUrl.replace(/\/$/, '')}/chat/completions`;
@@ -404,6 +404,313 @@ export function createMockProvider(
     protocol: 'openai',
     priority: config.priority ?? 0,
   };
+}
+
+// ============================================
+// Anthropic 流式 SSE 翻译 → OpenAI 兼容
+// ============================================
+
+/**
+ * Anthropic Messages API SSE 流式调用
+ *
+ * Anthropic SSE 格式:
+ *   event: message_start
+ *   data: {"type":"message_start","message":{...}}
+ *
+ *   event: content_block_start
+ *   data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+ *
+ *   event: content_block_delta
+ *   data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}
+ *
+ *   event: content_block_stop
+ *   data: {"type":"content_block_stop","index":0}
+ *
+ *   event: message_delta
+ *   data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}
+ *
+ *   event: message_stop
+ *   data: {"type":"message_stop"}
+ *
+ *   event: ping  (跳过)
+ *   event: error (翻译成 error chunk)
+ *
+ *   (可选 tool_use 流式)
+ *   event: content_block_start (type=tool_use)
+ *   event: content_block_delta (type=input_json_delta, partial_json 累积)
+ *
+ * 翻译成 OpenAI SSE 格式的 chunks
+ */
+export async function* callAnthropicStream(
+  config: ProviderConfig,
+  req: LLMRequest
+): AsyncGenerator<OpenAIStreamChunk, void, void> {
+  const url = `${config.baseUrl.replace(/\/$/, '')}/v1/messages`;
+  const model = req.model ?? config.defaultModel;
+
+  // 提取 system message
+  const system = req.messages.find(m => m.role === 'system');
+  const nonSystem = req.messages.filter(m => m.role !== 'system');
+
+  const body: Record<string, unknown> = {
+    model,
+    messages: nonSystem.map(m => ({
+      role: m.role,
+      content: typeof m.content === 'string' ? m.content : (m.content as any),
+    })),
+    max_tokens: req.maxTokens ?? 4096,
+    stream: true,
+  };
+  if (system && typeof system.content === 'string') body.system = system.content;
+  if (req.temperature !== undefined) body.temperature = req.temperature;
+  if (req.tools) {
+    body.tools = (req.tools as any[]).map(t => ({
+      name: t.function?.name ?? t.name,
+      description: t.function?.description ?? t.description,
+      input_schema: t.function?.parameters ?? t.input_schema ?? { type: 'object' },
+    }));
+  }
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'x-api-key': config.apiKey,
+    'anthropic-version': '2023-06-01',
+    Accept: 'text/event-stream',
+    ...config.headers,
+  };
+
+  const controller = new AbortController();
+  const timeoutMs = calcTimeoutMs(req.maxTokens);
+  const timer = setTimeout(() => controller.abort('timeout'), timeoutMs);
+
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (err: unknown) {
+    clearTimeout(timer);
+    const e = err as { name?: string; message?: string };
+    if (e.name === 'AbortError') {
+      throw new ProviderError(config.name, 'timeout', null, `timeout after ${timeoutMs}ms`, timeoutMs);
+    }
+    throw new ProviderError(config.name, 'unknown', null, e.message ?? 'fetch failed', 0);
+  }
+
+  if (!res.ok) {
+    clearTimeout(timer);
+    const failType = mapStatusToFailType(res.status);
+    const text = await res.text().catch(() => '');
+    throw new ProviderError(config.name, failType, res.status, text.slice(0, 200), 0);
+  }
+
+  if (!res.body) {
+    clearTimeout(timer);
+    throw new ProviderError(config.name, 'parse_error', res.status, 'no response body', 0);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  // tool_use 流式累积:index → { id, name, inputJson }
+  const toolAcc = new Map<number, { id: string; name: string; inputJson: string }>();
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // Anthropic SSE:event 行 + data 行 + 空行
+      // 用空行切分
+      const events = buffer.split('\n\n');
+      buffer = events.pop() ?? '';
+
+      for (const ev of events) {
+        const lines = ev.split('\n');
+        let eventName = '';
+        let dataLine = '';
+        for (const line of lines) {
+          if (line.startsWith('event:')) eventName = line.slice(6).trim();
+          else if (line.startsWith('data:')) dataLine += line.slice(5).trim();
+        }
+        if (!dataLine) continue;
+        if (eventName === 'ping') continue;
+
+        let payload: any;
+        try {
+          payload = JSON.parse(dataLine);
+        } catch {
+          continue;
+        }
+
+        const chunk = translateAnthropicEvent(eventName, payload, toolAcc);
+        if (chunk) yield chunk;
+      }
+    }
+  } finally {
+    clearTimeout(timer);
+    reader.releaseLock();
+  }
+}
+
+/**
+ * 翻译单个 Anthropic SSE event → OpenAI chunk
+ */
+function translateAnthropicEvent(
+  eventName: string,
+  payload: any,
+  toolAcc: Map<number, { id: string; name: string; inputJson: string }>
+): OpenAIStreamChunk | null {
+  switch (payload.type) {
+    case 'message_start': {
+      // emit role chunk
+      return {
+        id: payload.message?.id,
+        object: 'chat.completion.chunk',
+        created: Math.floor(Date.now() / 1000),
+        model: payload.message?.model,
+        choices: [{
+          index: 0,
+          delta: { role: 'assistant', content: '' },
+          finish_reason: null,
+        }],
+      };
+    }
+
+    case 'content_block_start': {
+      const block = payload.content_block;
+      if (block?.type === 'text') {
+        // text 块开始 → emit 空 content chunk(开启 content 流)
+        return {
+          choices: [{
+            index: 0,
+            delta: { content: '' },
+            finish_reason: null,
+          }],
+        };
+      }
+      if (block?.type === 'tool_use') {
+        // 累积 tool_use 信息
+        toolAcc.set(payload.index, {
+          id: block.id,
+          name: block.name,
+          inputJson: '',
+        });
+        return {
+          choices: [{
+            index: 0,
+            delta: {
+              tool_calls: [{
+                index: payload.index,
+                id: block.id,
+                type: 'function',
+                function: { name: block.name, arguments: '' },
+              }],
+            },
+            finish_reason: null,
+          }],
+        };
+      }
+      return null;
+    }
+
+    case 'content_block_delta': {
+      const delta = payload.delta;
+      if (delta?.type === 'text_delta' && typeof delta.text === 'string') {
+        return {
+          choices: [{
+            index: 0,
+            delta: { content: delta.text },
+            finish_reason: null,
+          }],
+        };
+      }
+      if (delta?.type === 'input_json_delta') {
+        const acc = toolAcc.get(payload.index);
+        if (acc) {
+          acc.inputJson += delta.partial_json ?? '';
+          return {
+            choices: [{
+              index: 0,
+              delta: {
+                tool_calls: [{
+                  index: payload.index,
+                  function: { arguments: delta.partial_json ?? '' },
+                }],
+              },
+              finish_reason: null,
+            }],
+          };
+        }
+      }
+      return null;
+    }
+
+    case 'content_block_stop':
+    case 'message_delta': {
+      // message_delta 含 stop_reason + final usage
+      if (payload.delta?.stop_reason) {
+        return {
+          choices: [{
+            index: 0,
+            delta: {},
+            finish_reason: mapAnthropicStopReason(payload.delta.stop_reason),
+          }],
+        };
+      }
+      if (payload.usage) {
+        return {
+          choices: [{
+            index: 0,
+            delta: {},
+            finish_reason: null,
+          }],
+          usage: {
+            prompt_tokens: payload.usage.input_tokens ?? 0,
+            completion_tokens: payload.usage.output_tokens ?? 0,
+            total_tokens: (payload.usage.input_tokens ?? 0) + (payload.usage.output_tokens ?? 0),
+          },
+        };
+      }
+      return null;
+    }
+
+    case 'message_stop':
+      // 终止标记 → caller 会写 [DONE]
+      return null;
+
+    case 'error':
+      // Anthropic error event
+      return {
+        choices: [{
+          index: 0,
+          delta: {},
+          finish_reason: 'stop',
+        }],
+      };
+
+    default:
+      return null;
+  }
+}
+
+function mapAnthropicStopReason(reason: string | null): 'stop' | 'length' | 'tool_calls' | null {
+  switch (reason) {
+    case 'end_turn':
+    case 'stop_sequence':
+      return 'stop';
+    case 'max_tokens':
+      return 'length';
+    case 'tool_use':
+      return 'tool_calls';
+    default:
+      return null;
+  }
 }
 
 export type { CallResult };
